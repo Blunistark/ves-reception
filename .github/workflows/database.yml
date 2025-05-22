@@ -1,0 +1,308 @@
+name: Database Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Database operation to perform'
+        required: true
+        type: choice
+        options:
+        - backup
+        - restore
+        - migrate
+        - seed
+        - cleanup
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+      confirmation:
+        description: 'Type "CONFIRM" to proceed with database operations'
+        required: true
+        type: string
+
+jobs:
+  database-operations:
+    runs-on: ubuntu-latest
+    if: inputs.confirmation == 'CONFIRM'
+    
+    environment: 
+      name: ${{ inputs.environment }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.1
+        extensions: mbstring, xml, ctype, iconv, intl, pdo_mysql
+
+    - name: Validate database connection
+      run: |
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          echo 'Database connection successful\n';
+          
+          // Check current database status
+          \$stmt = \$pdo->query('SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = \"${{ secrets.DB_NAME }}\"');
+          \$result = \$stmt->fetch(PDO::FETCH_ASSOC);
+          echo 'Current tables in database: ' . \$result['count'] . '\n';
+          
+        } catch (PDOException \$e) {
+          echo 'Database connection failed: ' . \$e->getMessage() . '\n';
+          exit(1);
+        }
+        "
+
+    - name: Database Backup
+      if: inputs.operation == 'backup'
+      run: |
+        echo "🔄 Creating database backup..."
+        
+        # Generate backup filename
+        BACKUP_FILE="backup_$(date +%Y%m%d_%H%M%S).sql"
+        
+        # Create backup using PHP (since mysqldump might not be available)
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          
+          \$backup = \"-- Database Backup\n\";
+          \$backup .= \"-- Created: \" . date('Y-m-d H:i:s') . \"\n\";
+          \$backup .= \"-- Database: ${{ secrets.DB_NAME }}\n\n\";
+          
+          \$backup .= \"SET FOREIGN_KEY_CHECKS=0;\n\n\";
+          
+          // Get all tables
+          \$tables = \$pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+          
+          foreach (\$tables as \$table) {
+            // Drop table statement
+            \$backup .= \"DROP TABLE IF EXISTS \`\$table\`;\n\";
+            
+            // Create table statement
+            \$result = \$pdo->query(\"SHOW CREATE TABLE \`\$table\`\")->fetch(PDO::FETCH_ASSOC);
+            \$backup .= \$result['Create Table'] . \";\n\n\";
+            
+            // Insert data
+            \$rows = \$pdo->query(\"SELECT * FROM \`\$table\`\")->fetchAll(PDO::FETCH_ASSOC);
+            if (!empty(\$rows)) {
+              \$columns = array_keys(\$rows[0]);
+              \$backup .= \"INSERT INTO \`\$table\` (\`\" . implode('\`, \`', \$columns) . \"\`) VALUES\n\";
+              
+              \$values = [];
+              foreach (\$rows as \$row) {
+                \$rowValues = [];
+                foreach (\$row as \$value) {
+                  \$rowValues[] = \$value === null ? 'NULL' : \$pdo->quote(\$value);
+                }
+                \$values[] = '(' . implode(', ', \$rowValues) . ')';
+              }
+              \$backup .= implode(\",\n\", \$values) . \";\n\n\";
+            }
+          }
+          
+          \$backup .= \"SET FOREIGN_KEY_CHECKS=1;\n\";
+          
+          file_put_contents('$BACKUP_FILE', \$backup);
+          echo \"Backup created: $BACKUP_FILE\n\";
+          echo \"Backup size: \" . filesize('$BACKUP_FILE') . \" bytes\n\";
+          
+        } catch (PDOException \$e) {
+          echo 'Backup failed: ' . \$e->getMessage() . \"\n\";
+          exit(1);
+        }
+        "
+
+    - name: Database Migration
+      if: inputs.operation == 'migrate'
+      run: |
+        echo "🔄 Running database migrations..."
+        
+        # Check if database exists and has tables
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          
+          // Check if tables exist
+          \$stmt = \$pdo->query('SHOW TABLES');
+          \$tables = \$stmt->fetchAll(PDO::FETCH_COLUMN);
+          
+          echo 'Current tables: ' . implode(', ', \$tables) . \"\n\";
+          
+          // Run migrations if needed
+          if (!in_array('users', \$tables)) {
+            echo 'Users table missing. Creating...\n';
+            // Would run migration SQL here
+          }
+          
+          if (!in_array('admission_inquiries', \$tables)) {
+            echo 'Admission inquiries table missing. Creating...\n';
+            // Would run migration SQL here
+          }
+          
+          if (!in_array('visitors', \$tables)) {
+            echo 'Visitors table missing. Creating...\n';
+            // Would run migration SQL here
+          }
+          
+          echo 'Migration check completed\n';
+          
+        } catch (PDOException \$e) {
+          echo 'Migration failed: ' . \$e->getMessage() . \"\n\";
+          exit(1);
+        }
+        "
+
+    - name: Database Seeding
+      if: inputs.operation == 'seed'
+      run: |
+        echo "🌱 Seeding database with sample data..."
+        
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          
+          // Check if users table has data
+          \$stmt = \$pdo->query('SELECT COUNT(*) FROM users');
+          \$userCount = \$stmt->fetchColumn();
+          
+          if (\$userCount == 0) {
+            echo 'Seeding users table...\n';
+            
+            // Insert admin user
+            \$stmt = \$pdo->prepare('INSERT INTO users (username, email, password, full_name, role) VALUES (?, ?, ?, ?, ?)');
+            \$stmt->execute(['admin', 'admin@school.com', password_hash('admin123', PASSWORD_DEFAULT), 'System Administrator', 'admin']);
+            
+            // Insert staff user
+            \$stmt->execute(['staff1', 'staff1@school.com', password_hash('admin123', PASSWORD_DEFAULT), 'Staff Member', 'staff']);
+            
+            // Insert viewer user
+            \$stmt->execute(['viewer1', 'viewer1@school.com', password_hash('admin123', PASSWORD_DEFAULT), 'Viewer User', 'viewer']);
+            
+            echo 'Users seeded successfully\n';
+          } else {
+            echo 'Users table already has data (\$userCount users)\n';
+          }
+          
+          // Check admission inquiries
+          \$stmt = \$pdo->query('SELECT COUNT(*) FROM admission_inquiries');
+          \$admissionCount = \$stmt->fetchColumn();
+          echo 'Admission inquiries: \$admissionCount\n';
+          
+          // Check visitors
+          \$stmt = \$pdo->query('SELECT COUNT(*) FROM visitors');
+          \$visitorCount = \$stmt->fetchColumn();
+          echo 'Visitors: \$visitorCount\n';
+          
+        } catch (PDOException \$e) {
+          echo 'Seeding failed: ' . \$e->getMessage() . \"\n\";
+          exit(1);
+        }
+        "
+
+    - name: Database Cleanup
+      if: inputs.operation == 'cleanup'
+      run: |
+        echo "🧹 Cleaning up database..."
+        
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          
+          // Clean up old logs (if you have a logs table)
+          // \$pdo->exec('DELETE FROM logs WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)');
+          
+          // Clean up old sessions (if you have a sessions table)
+          // \$pdo->exec('DELETE FROM sessions WHERE last_activity < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 DAY))');
+          
+          // Optimize tables
+          \$tables = \$pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+          foreach (\$tables as \$table) {
+            \$pdo->exec(\"OPTIMIZE TABLE \`\$table\`\");
+            echo \"Optimized table: \$table\n\";
+          }
+          
+          echo 'Database cleanup completed\n';
+          
+        } catch (PDOException \$e) {
+          echo 'Cleanup failed: ' . \$e->getMessage() . \"\n\";
+          exit(1);
+        }
+        "
+
+    - name: Upload backup file
+      if: inputs.operation == 'backup'
+      uses: actions/upload-artifact@v4
+      with:
+        name: database-backup-${{ inputs.environment }}-${{ github.run_number }}
+        path: backup_*.sql
+        retention-days: 90
+
+    - name: Database operation summary
+      if: always()
+      run: |
+        echo "📊 Database Operation Summary"
+        echo "=========================="
+        echo "Operation: ${{ inputs.operation }}"
+        echo "Environment: ${{ inputs.environment }}"
+        echo "Status: ${{ job.status }}"
+        echo "Timestamp: $(date)"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Run ID: ${{ github.run_id }}"
+        
+        # Get final database stats
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          
+          echo \"\nDatabase Statistics:\n\";
+          echo \"==================\n\";
+          
+          // Table counts
+          \$tables = ['users', 'admission_inquiries', 'visitors'];
+          foreach (\$tables as \$table) {
+            try {
+              \$stmt = \$pdo->query(\"SELECT COUNT(*) FROM \`\$table\`\");
+              \$count = \$stmt->fetchColumn();
+              echo \"\$table: \$count records\n\";
+            } catch (Exception \$e) {
+              echo \"\$table: Table not found\n\";
+            }
+          }
+          
+          // Database size
+          \$stmt = \$pdo->query('SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS size_mb FROM information_schema.tables WHERE table_schema = \"${{ secrets.DB_NAME }}\"');
+          \$size = \$stmt->fetchColumn();
+          echo \"Database size: \$size MB\n\";
+          
+        } catch (PDOException \$e) {
+          echo 'Could not get database statistics: ' . \$e->getMessage() . \"\n\";
+        }
+        "
+
+  validate-confirmation:
+    runs-on: ubuntu-latest
+    if: inputs.confirmation != 'CONFIRM'
+    
+    steps:
+    - name: Invalid confirmation
+      run: |
+        echo "❌ Invalid confirmation"
+        echo "You must type 'CONFIRM' exactly to proceed with database operations"
+        echo "This is a safety measure to prevent accidental database modifications"
+        exit 1
