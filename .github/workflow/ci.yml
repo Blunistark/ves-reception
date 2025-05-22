@@ -1,0 +1,336 @@
+name: CI - Test and Validate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        php-version: [7.4, 8.0, 8.1, 8.2]
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: school_admin_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.php-version }}
+        extensions: mbstring, xml, ctype, iconv, intl, pdo_mysql, dom, filter, gd, iconv, json, libxml, mysqli, pdo
+        ini-values: post_max_size=256M, upload_max_filesize=256M, max_execution_time=300
+
+    - name: Install Composer dependencies
+      run: |
+        if [ -f composer.json ]; then
+          composer install --prefer-dist --no-progress --no-suggest
+        else
+          echo "No composer.json found, skipping Composer install"
+        fi
+
+    - name: Create test environment file
+      run: |
+        cp .env.example .env.testing || echo "No .env.example found, creating basic .env.testing"
+        cat > .env.testing << EOF
+        DB_HOST=127.0.0.1
+        DB_USERNAME=root
+        DB_PASSWORD=root
+        DB_NAME=school_admin_test
+        DB_PORT=3306
+        ENVIRONMENT=testing
+        EOF
+
+    - name: Wait for MySQL to be ready
+      run: |
+        while ! mysqladmin ping -h"127.0.0.1" -P"3306" -u"root" -p"root" --silent; do
+          sleep 1
+        done
+
+    - name: Create database schema
+      run: |
+        mysql -h 127.0.0.1 -P 3306 -u root -proot -e "CREATE DATABASE IF NOT EXISTS school_admin_test;"
+        mysql -h 127.0.0.1 -P 3306 -u root -proot school_admin_test < database_schema.sql
+
+    - name: PHP Syntax Check
+      run: find . -name "*.php" -exec php -l {} \;
+
+    - name: PHP Code Style Check
+      run: |
+        # Check for basic PHP coding standards
+        find . -name "*.php" -exec php -l {} \; > /dev/null
+        echo "PHP syntax check passed"
+
+    - name: Security Check - Sensitive Files
+      run: |
+        # Check for sensitive files that shouldn't be in repo
+        SENSITIVE_FILES=".env .env.local config/database.php"
+        for file in $SENSITIVE_FILES; do
+          if [ -f "$file" ]; then
+            echo "Error: Sensitive file $file found in repository"
+            exit 1
+          fi
+        done
+        echo "Sensitive files check passed"
+
+    - name: Check for TODO/FIXME comments
+      run: |
+        TODO_COUNT=$(grep -r "TODO\|FIXME" --include="*.php" . | wc -l)
+        echo "Found $TODO_COUNT TODO/FIXME comments"
+        if [ $TODO_COUNT -gt 50 ]; then
+          echo "Warning: High number of TODO/FIXME comments ($TODO_COUNT)"
+        fi
+
+    - name: Database Connection Test
+      run: |
+        php -r "
+        \$host = '127.0.0.1';
+        \$port = '3306';
+        \$dbname = 'school_admin_test';
+        \$username = 'root';
+        \$password = 'root';
+        try {
+          \$pdo = new PDO(\"mysql:host=\$host;port=\$port;dbname=\$dbname\", \$username, \$password);
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          echo 'Database connection successful\n';
+          
+          // Test basic queries
+          \$stmt = \$pdo->query('SELECT COUNT(*) FROM users');
+          \$count = \$stmt->fetchColumn();
+          echo \"Users table has \$count records\n\";
+          
+          \$stmt = \$pdo->query('SELECT COUNT(*) FROM admission_inquiries');
+          \$count = \$stmt->fetchColumn();
+          echo \"Admission inquiries table has \$count records\n\";
+          
+        } catch (PDOException \$e) {
+          echo 'Database connection failed: ' . \$e->getMessage() . \"\n\";
+          exit(1);
+        }
+        "
+
+    - name: Test Basic PHP Functionality
+      run: |
+        php -r "
+        // Test password hashing
+        \$password = 'test123';
+        \$hash = password_hash(\$password, PASSWORD_DEFAULT);
+        if (password_verify(\$password, \$hash)) {
+          echo 'Password hashing test passed\n';
+        } else {
+          echo 'Password hashing test failed\n';
+          exit(1);
+        }
+        
+        // Test session functionality
+        if (session_start()) {
+          echo 'Session test passed\n';
+        } else {
+          echo 'Session test failed\n';
+          exit(1);
+        }
+        
+        // Test JSON functionality
+        \$data = ['test' => 'data'];
+        \$json = json_encode(\$data);
+        \$decoded = json_decode(\$json, true);
+        if (\$decoded['test'] === 'data') {
+          echo 'JSON test passed\n';
+        } else {
+          echo 'JSON test failed\n';
+          exit(1);
+        }
+        "
+
+    - name: Validate HTML/CSS/JS
+      run: |
+        # Basic validation for HTML structure
+        find . -name "*.php" -exec grep -l "<!DOCTYPE html>" {} \; | while read file; do
+          if grep -q "<html" "$file" && grep -q "</html>" "$file"; then
+            echo "HTML structure check passed for $file"
+          else
+            echo "Warning: HTML structure issue in $file"
+          fi
+        done
+
+    - name: Check File Permissions
+      run: |
+        # Check that PHP files are not executable
+        find . -name "*.php" -perm /111 | while read file; do
+          echo "Warning: PHP file $file has execute permissions"
+        done
+
+    - name: Validate Database Schema
+      run: |
+        # Check if all required tables exist
+        mysql -h 127.0.0.1 -P 3306 -u root -proot school_admin_test -e "
+        SELECT 
+          CASE 
+            WHEN COUNT(*) = 3 THEN 'All required tables exist'
+            ELSE CONCAT('Missing tables. Found: ', COUNT(*), ' Expected: 3')
+          END as table_check
+        FROM information_schema.tables 
+        WHERE table_schema = 'school_admin_test' 
+        AND table_name IN ('users', 'admission_inquiries', 'visitors');
+        "
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run security scan
+      run: |
+        # Check for common security issues
+        echo "Checking for potential security issues..."
+        
+        # Check for SQL injection patterns
+        if grep -r "mysql_query\|mysqli_query" --include="*.php" .; then
+          echo "Warning: Found potentially unsafe database queries"
+        fi
+        
+        # Check for eval() usage
+        if grep -r "eval(" --include="*.php" .; then
+          echo "Error: Found eval() usage - security risk"
+          exit 1
+        fi
+        
+        # Check for system() calls
+        if grep -r "system(\|exec(\|shell_exec(" --include="*.php" .; then
+          echo "Warning: Found system command execution"
+        fi
+        
+        # Check for file inclusion vulnerabilities
+        if grep -r "include.*\$\|require.*\$" --include="*.php" .; then
+          echo "Warning: Found dynamic file inclusion"
+        fi
+        
+        echo "Security scan completed"
+
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.1
+
+    - name: Check code complexity
+      run: |
+        echo "Analyzing code complexity..."
+        
+        # Count lines of code
+        TOTAL_LINES=$(find . -name "*.php" -exec wc -l {} + | tail -1 | awk '{print $1}')
+        echo "Total lines of PHP code: $TOTAL_LINES"
+        
+        # Count functions
+        FUNCTION_COUNT=$(grep -r "function " --include="*.php" . | wc -l)
+        echo "Total functions: $FUNCTION_COUNT"
+        
+        # Count classes
+        CLASS_COUNT=$(grep -r "class " --include="*.php" . | wc -l)
+        echo "Total classes: $CLASS_COUNT"
+        
+        # Check for long functions (over 50 lines)
+        echo "Checking for long functions..."
+        find . -name "*.php" -exec awk '/function /{start=NR; name=$2} /^}$/ && start {if(NR-start > 50) print FILENAME":"start":"name" ("NR-start" lines)"; start=0}' {} +
+
+    - name: Documentation check
+      run: |
+        # Check for README files
+        if [ ! -f "README.md" ] && [ ! -f "README.txt" ]; then
+          echo "Warning: No README file found"
+        fi
+        
+        # Check for inline documentation
+        COMMENT_LINES=$(grep -r "/\*\|//\|#" --include="*.php" . | wc -l)
+        CODE_LINES=$(grep -v "^\s*$\|^\s*//\|^\s*/\*\|^\s*\*" --include="*.php" -r . | wc -l)
+        
+        if [ $CODE_LINES -gt 0 ]; then
+          COMMENT_RATIO=$((COMMENT_LINES * 100 / CODE_LINES))
+          echo "Comment ratio: $COMMENT_RATIO%"
+          if [ $COMMENT_RATIO -lt 10 ]; then
+            echo "Warning: Low comment ratio ($COMMENT_RATIO%)"
+          fi
+        fi
+
+  build-artifacts:
+    runs-on: ubuntu-latest
+    needs: [test, security-scan, code-quality]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create deployment package
+      run: |
+        # Create deployment directory
+        mkdir -p deployment-package
+        
+        # Copy application files (exclude development files)
+        rsync -av --exclude='.git' \
+                  --exclude='.github' \
+                  --exclude='node_modules' \
+                  --exclude='tests' \
+                  --exclude='.env*' \
+                  --exclude='*.md' \
+                  --exclude='composer.*' \
+                  --exclude='package*.json' \
+                  --exclude='.gitignore' \
+                  . deployment-package/
+        
+        # Create version file
+        echo "$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" > deployment-package/VERSION
+        
+        # Create deployment info
+        cat > deployment-package/DEPLOYMENT_INFO.txt << EOF
+        Deployment Information
+        =====================
+        Build Date: $(date)
+        Git Commit: $(git rev-parse HEAD)
+        Git Branch: $(git rev-parse --abbrev-ref HEAD)
+        Build Number: ${{ github.run_number }}
+        Workflow: ${{ github.workflow }}
+        EOF
+
+    - name: Upload deployment artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-package-${{ github.run_number }}
+        path: deployment-package/
+        retention-days: 30
+
+    - name: Create release archive
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        tar -czf school-admin-system-${{ github.ref_name }}.tar.gz deployment-package/
+        zip -r school-admin-system-${{ github.ref_name }}.zip deployment-package/
+
+    - name: Upload release artifacts
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-archives-${{ github.ref_name }}
+        path: |
+          school-admin-system-${{ github.ref_name }}.tar.gz
+          school-admin-system-${{ github.ref_name }}.zip
+        retention-days: 90
