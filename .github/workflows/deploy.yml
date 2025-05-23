@@ -193,7 +193,7 @@ jobs:
         port: ${{ env.FTP_PORT }}
         protocol: ${{ env.FTP_PROTOCOL }}
         local-dir: ./deployment-package/
-        server-dir: ${{ env.FTP_SERVER_DIR }}
+        server-dir: ${{ env.FTP_SERVER_DIR }}/
         exclude: |
           **/.git*
           **/.git*/**
