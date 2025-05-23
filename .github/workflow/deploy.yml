@@ -190,10 +190,10 @@ jobs:
         server: ${{ secrets.FTP_HOST }}
         username: ${{ secrets.FTP_USERNAME }}
         password: ${{ secrets.FTP_PASSWORD }}
-        port: ${{ env.FTP_PORT || 21 }}
-        protocol: ${{ env.FTP_PROTOCOL || 'ftp' }}
+        port: ${{ env.FTP_PORT }}
+        protocol: ${{ env.FTP_PROTOCOL }}
         local-dir: ./deployment-package/
-        server-dir: ${{ env.FTP_SERVER_DIR || '/' }}
+        server-dir: ${{ env.FTP_SERVER_DIR }}
         exclude: |
           **/.git*
           **/.git*/**
