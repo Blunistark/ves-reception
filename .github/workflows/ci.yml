@@ -1,4 +1,4 @@
-name: CI - Fixed Version
+name: CI - Test and Validate
 
 on:
   push:

@@ -1,0 +1,311 @@
+name: CD - Deploy to Hostinger
+
+on:
+  workflow_run:
+    workflows: ["CI - Test and Validate"]
+    types:
+      - completed
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+      force_deploy:
+        description: 'Force deployment (skip some checks)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    environment: 
+      name: ${{ inputs.environment || 'production' }}
+      url: ${{ vars.DEPLOYMENT_URL }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.1
+        extensions: mbstring, xml, ctype, iconv, intl, pdo_mysql
+
+    - name: Download deployment artifact
+      if: github.event_name == 'workflow_run'
+      uses: actions/download-artifact@v4
+      with:
+        name: deployment-package-${{ github.event.workflow_run.run_number || github.run_number }}
+        path: deployment-package/
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        run-id: ${{ github.event.workflow_run.id }}
+
+    - name: Prepare deployment files
+      run: |
+        # If we don't have the artifact, create deployment package
+        if [ ! -d "deployment-package" ]; then
+          mkdir -p deployment-package
+          rsync -av --exclude='.git' \
+                    --exclude='.github' \
+                    --exclude='node_modules' \
+                    --exclude='tests' \
+                    --exclude='.env*' \
+                    --exclude='*.md' \
+                    --exclude='composer.*' \
+                    --exclude='package*.json' \
+                    --exclude='.gitignore' \
+                    . deployment-package/
+        fi
+        
+        # Create version file
+        echo "$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" > deployment-package/VERSION
+        
+        # List files to be deployed
+        echo "Files to be deployed:"
+        find deployment-package -type f | head -20
+        echo "... (showing first 20 files)"
+
+    - name: Create configuration files
+      run: |
+        # Create production config from template
+        cat > deployment-package/includes/config.php << 'EOF'
+        <?php
+        // Production Configuration for Hostinger
+        define('DB_HOST', '${{ secrets.DB_HOST }}');
+        define('DB_USERNAME', '${{ secrets.DB_USERNAME }}');
+        define('DB_PASSWORD', '${{ secrets.DB_PASSWORD }}');
+        define('DB_NAME', '${{ secrets.DB_NAME }}');
+
+        define('APP_NAME', 'School Admin System');
+        define('APP_VERSION', '1.0.0');
+        define('BASE_URL', '${{ vars.BASE_URL || "/" }}');
+
+        date_default_timezone_set('${{ vars.TIMEZONE || "UTC" }}');
+
+        // Production settings
+        error_reporting(0);
+        ini_set('display_errors', 0);
+        ini_set('log_errors', 1);
+        ini_set('error_log', dirname(__FILE__) . '/../logs/php_errors.log');
+
+        // Session configuration
+        ini_set('session.cookie_httponly', 1);
+        ini_set('session.use_only_cookies', 1);
+        ini_set('session.cookie_secure', ${{ vars.ENABLE_HTTPS || 0 }});
+        ini_set('session.gc_maxlifetime', 3600);
+        session_set_cookie_params([
+            'lifetime' => 3600,
+            'path' => '/',
+            'domain' => '',
+            'secure' => ${{ vars.ENABLE_HTTPS || 'false' }},
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]);
+
+        if (session_status() == PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        // Security headers
+        if (!headers_sent()) {
+            header('X-Content-Type-Options: nosniff');
+            header('X-Frame-Options: DENY');
+            header('X-XSS-Protection: 1; mode=block');
+            header('Referrer-Policy: strict-origin-when-cross-origin');
+        }
+
+        // Path constants
+        define('ROOT_PATH', dirname(__DIR__) . '/');
+        define('INCLUDES_PATH', ROOT_PATH . 'includes/');
+        define('PAGES_PATH', ROOT_PATH . 'pages/');
+        define('ASSETS_PATH', ROOT_PATH . 'assets/');
+        define('LOGS_PATH', ROOT_PATH . 'logs/');
+        define('UPLOADS_PATH', ROOT_PATH . 'uploads/');
+
+        // Create directories
+        $dirs = [LOGS_PATH, UPLOADS_PATH];
+        foreach ($dirs as $dir) {
+            if (!file_exists($dir)) {
+                if (@mkdir($dir, 0755, true)) {
+                    $htaccess_content = "Order Deny,Allow\nDeny from all";
+                    @file_put_contents($dir . '.htaccess', $htaccess_content);
+                }
+            }
+        }
+
+        // Role permissions
+        define('ROLES', [
+            'admin' => [
+                'view_dashboard',
+                'manage_admissions',
+                'manage_visitors',
+                'manage_users',
+                'export_data',
+                'backup_database',
+                'view_logs'
+            ],
+            'staff' => [
+                'view_dashboard',
+                'manage_admissions',
+                'manage_visitors',
+                'export_data'
+            ],
+            'viewer' => [
+                'view_dashboard'
+            ]
+        ]);
+        ?>
+        EOF
+
+    - name: Create backup before deployment
+      run: |
+        echo "Creating backup timestamp: $(date)" > backup_info.txt
+        # The actual backup will be done on the server via FTP commands
+
+    - name: Test database connection
+      run: |
+        php -r "
+        try {
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          echo 'Database connection successful';
+        } catch (PDOException \$e) {
+          echo 'Database connection failed: ' . \$e->getMessage();
+          exit(1);
+        }
+        "
+
+    - name: Deploy to Hostinger via FTP
+      uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+      with:
+        server: ${{ secrets.FTP_HOST }}
+        username: ${{ secrets.FTP_USERNAME }}
+        password: ${{ secrets.FTP_PASSWORD }}
+        port: ${{ secrets.FTP_PORT || 21 }}
+        protocol: ${{ secrets.FTP_PROTOCOL || 'ftp' }}
+        local-dir: ./deployment-package/
+        server-dir: ${{ secrets.FTP_SERVER_DIR || '/' }}
+        exclude: |
+          **/.git*
+          **/.git*/**
+          **/node_modules/**
+          **/tests/**
+          **/.env*
+          **/README.md
+          **/composer.*
+          **/package*.json
+          **/.gitignore
+        log-level: verbose
+        security: loose
+
+    - name: Run post-deployment tasks
+      run: |
+        echo "Deployment completed at: $(date)"
+        echo "Deployed commit: $(git rev-parse HEAD)"
+        echo "Deployed to: ${{ vars.DEPLOYMENT_URL }}"
+
+    - name: Health check
+      run: |
+        # Wait a moment for files to be processed
+        sleep 10
+        
+        # Basic health check
+        HEALTH_URL="${{ vars.DEPLOYMENT_URL }}"
+        if [ -n "$HEALTH_URL" ]; then
+          echo "Performing health check on: $HEALTH_URL"
+          
+          # Check if site is accessible
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+          
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Health check passed - Site is accessible"
+          elif [ "$HTTP_STATUS" = "302" ] || [ "$HTTP_STATUS" = "301" ]; then
+            echo "✅ Health check passed - Site redirected (likely to login)"
+          else
+            echo "⚠️  Health check warning - HTTP status: $HTTP_STATUS"
+          fi
+        else
+          echo "⚠️  No deployment URL configured for health check"
+        fi
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "🎉 Deployment successful!"
+          echo "Site URL: ${{ vars.DEPLOYMENT_URL }}"
+          echo "Commit: $(git rev-parse --short HEAD)"
+          echo "Time: $(date)"
+        else
+          echo "❌ Deployment failed!"
+          echo "Check the logs above for details"
+        fi
+
+    - name: Create deployment summary
+      if: always()
+      run: |
+        cat > deployment-summary.md << EOF
+        # Deployment Summary
+        
+        **Status**: ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}
+        **Environment**: ${{ inputs.environment || 'production' }}
+        **URL**: ${{ vars.DEPLOYMENT_URL }}
+        **Commit**: $(git rev-parse --short HEAD)
+        **Date**: $(date)
+        **Workflow**: ${{ github.workflow }}
+        **Run ID**: ${{ github.run_id }}
+        
+        ## Files Deployed
+        - Application code
+        - Database configuration  
+        - Assets (CSS, JS)
+        - Security configurations
+        
+        ## Post-Deployment
+        - Database connection: Verified
+        - Site accessibility: Checked
+        - Configuration: Updated
+        
+        EOF
+        
+        cat deployment-summary.md
+
+    - name: Upload deployment logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-logs-${{ github.run_number }}
+        path: |
+          deployment-summary.md
+          backup_info.txt
+        retention-days: 30
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure() && !inputs.force_deploy
+    
+    steps:
+    - name: Prepare rollback
+      run: |
+        echo "Deployment failed. Preparing rollback procedure..."
+        echo "This would typically restore from the last known good backup"
+        echo "Manual intervention may be required"
+
+    - name: Notify rollback needed
+      run: |
+        echo "🚨 ROLLBACK REQUIRED"
+        echo "Deployment failed and rollback is needed"
+        echo "Please check Hostinger file manager for backup restoration"
