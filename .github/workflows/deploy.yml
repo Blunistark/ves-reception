@@ -175,7 +175,7 @@ jobs:
       run: |
         php -r "
         try {
-          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};port=3306;dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
           \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
           echo 'Database connection successful';
         } catch (PDOException \$e) {
@@ -190,10 +190,10 @@ jobs:
         server: ${{ secrets.FTP_HOST }}
         username: ${{ secrets.FTP_USERNAME }}
         password: ${{ secrets.FTP_PASSWORD }}
-        port: ${{ env.FTP_PORT || 21 }}
-        protocol: ${{ env.FTP_PROTOCOL || 'ftp' }}
+        port: ${{ env.FTP_PORT }}
+        protocol: ${{ env.FTP_PROTOCOL }}
         local-dir: ./deployment-package/
-        server-dir: ${{ env.FTP_SERVER_DIR || '/' }}
+        server-dir: ${{ env.FTP_SERVER_DIR }}
         exclude: |
           **/.git*
           **/.git*/**
