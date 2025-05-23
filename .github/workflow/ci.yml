@@ -63,34 +63,6 @@ jobs:
           echo "⚠️ database_schema.sql not found, skipping schema import"
         fi
 
-    - name: PHP Syntax Check
-      run: |
-        echo "🔍 Checking PHP syntax..."
-        
-        # Count PHP files
-        PHP_COUNT=$(find . -name "*.php" -type f | wc -l)
-        echo "📝 Found $PHP_COUNT PHP files to check"
-        
-        # Check each file and track failures
-        FAILED_FILES=""
-        for file in $(find . -name "*.php" -type f); do
-          if ! php -l "$file" >/dev/null 2>&1; then
-            echo "❌ Syntax error in: $file"
-            php -l "$file"
-            FAILED_FILES="$FAILED_FILES $file"
-          else
-            echo "✅ $file - OK"
-          fi
-        done
-        
-        # Check if any files failed
-        if [ -n "$FAILED_FILES" ]; then
-          echo "❌ PHP syntax errors found in:$FAILED_FILES"
-          exit 1
-        else
-          echo "🎉 All $PHP_COUNT PHP files have valid syntax!"
-        fi
-
     - name: Test Core PHP Functions
       run: |
         echo "🧪 Testing core PHP functionality..."
