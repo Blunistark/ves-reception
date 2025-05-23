@@ -66,15 +66,21 @@ jobs:
     - name: PHP Syntax Check
       run: |
         echo "🔍 Checking PHP syntax..."
-        find . -name "*.php" -type f -exec php -l {} \; | grep -v "No syntax errors detected" || true
         
         # Count PHP files
         PHP_COUNT=$(find . -name "*.php" -type f | wc -l)
-        echo "📝 Checked $PHP_COUNT PHP files for syntax errors"
+        echo "📝 Found $PHP_COUNT PHP files to check"
         
-        # Check for syntax errors
-        if find . -name "*.php" -type f -exec php -l {} \; 2>&1 | grep -i "error"; then
+        # Check syntax and capture results
+        SYNTAX_OUTPUT=$(find . -name "*.php" -type f -exec php -l {} \; 2>&1)
+        echo "$SYNTAX_OUTPUT"
+        
+        # Check for actual syntax errors (not "No syntax errors detected")
+        if echo "$SYNTAX_OUTPUT" | grep -E "(Parse error|Fatal error|syntax error)" > /dev/null; then
           echo "❌ PHP syntax errors found!"
+          exit 1
+        elif echo "$SYNTAX_OUTPUT" | grep -v "No syntax errors detected" | grep -i "error" > /dev/null; then
+          echo "❌ PHP errors found!"
           exit 1
         else
           echo "✅ All PHP files have valid syntax!"
