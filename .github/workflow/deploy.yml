@@ -175,7 +175,7 @@ jobs:
       run: |
         php -r "
         try {
-          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
+          \$pdo = new PDO('mysql:host=${{ secrets.DB_HOST }};port=3306;dbname=${{ secrets.DB_NAME }}', '${{ secrets.DB_USERNAME }}', '${{ secrets.DB_PASSWORD }}');
           \$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
           echo 'Database connection successful';
         } catch (PDOException \$e) {
